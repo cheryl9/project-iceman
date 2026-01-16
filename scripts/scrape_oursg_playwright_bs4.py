@@ -4,37 +4,27 @@ import signal
 import sys
 from datetime import datetime, timezone
 from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 
+# ------------------------
+# Logging (stderr only)
+# ------------------------
 def log(*args):
-    # Logs to terminal even when stdout is redirected to a file
     print(*args, file=sys.stderr, flush=True)
 
 
+# ------------------------
+# Helpers
+# ------------------------
 def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
 def norm(s: str) -> str:
     return clean(s).lower()
-
-
-def parse_doc_meta(label: str):
-    # e.g. "CCMDA... (DOCX 61.6 KB)"
-    m = re.search(r"\(([^)]+)\)", label)
-    if not m:
-        return {}
-    inside = m.group(1)
-    type_m = re.search(r"\b([A-Z]{2,5})\b", inside)
-    size_m = re.search(r"(\d+(?:\.\d+)?)\s*KB", inside, re.I)
-    out = {}
-    if type_m:
-        out["file_type"] = type_m.group(1)
-    if size_m:
-        out["size_kb"] = float(size_m.group(1))
-    return out
 
 
 def dump_debug(page, html: str, reason: str):
@@ -44,19 +34,32 @@ def dump_debug(page, html: str, reason: str):
     page.screenshot(path="debug.png", full_page=True)
 
 
-def is_heading_tag(tagname: str) -> bool:
-    return tagname in ("h1", "h2", "h3", "h4")
+def is_inside_attachments(el) -> bool:
+    cur = el
+    while cur is not None and getattr(cur, "name", None):
+        if cur.name.lower() == "div":
+            cls = " ".join(cur.get("class", []))
+            if "attachments" in cls:
+                return True
+            if cur.get("aria-label") == "attachment-section":
+                return True
+        cur = cur.parent
+    return False
 
 
-def is_portal_heading(el) -> bool:
+def is_heading(el) -> bool:
     """
-    Supports:
-      - h2/h3/h4 headings
-      - div with class containing 'Title_'
-      - elements with role='heading'
+    Heading patterns on OurSG instruction pages:
+      1) Title_* divs (React/CSS modules)
+      2) h2/h3/h4
+      3) <p class="sub-head">Who can apply?</p> etc.
     """
-    tag = (el.name or "").lower()
-    if is_heading_tag(tag):
+    if not getattr(el, "name", None):
+        return False
+
+    tag = el.name.lower()
+
+    if tag in ("h2", "h3", "h4"):
         return True
 
     if tag == "div":
@@ -64,106 +67,239 @@ def is_portal_heading(el) -> bool:
         if "Title_" in cls:
             return True
 
-    if el.get("role") == "heading":
-        return True
+    if tag == "p":
+        cls_list = el.get("class", []) or []
+        if "sub-head" in cls_list:
+            return True
 
     return False
 
 
-# Text-marker fallback (when portal doesn't use real headings)
-FIELD_BY_MARKER = {
-    "who can apply?": "who_can_apply",
-    "who can apply": "who_can_apply",
-    "when to apply?": "when_to_apply",
-    "when to apply": "when_to_apply",
-    "how much funding can you receive?": "funding",
-    "how much funding can you receive": "funding",
-    "how to apply?": "how_to_apply",
-    "how to apply": "how_to_apply",
-}
+def get_heading_text(el) -> str:
+    return clean(el.get_text(" ", strip=True))
 
 
-def split_by_text_markers(lines: list[str]) -> dict:
-    buckets = {
-        "about": [],
-        "who_can_apply": [],
-        "when_to_apply": [],
-        "funding": [],
-        "how_to_apply": [],
-    }
-    current = "about"
-
-    for line in lines:
-        t = clean(line)
-        if not t:
-            continue
-
-        key = FIELD_BY_MARKER.get(t.lower())
-        if key:
-            current = key
-            continue  # do not include the marker itself
-
-        buckets[current].append(t)
-
-    return buckets
-
-
-def split_sections(container) -> list[dict]:
+def should_capture_div_text(el) -> bool:
     """
-    Walks through container descendants in DOM order.
-    Starts with 'About this grant' until a heading is found.
-    Collects p/li text into current section.
+    Capture div blocks that contain plain text instructions, e.g.:
+      <div class="text">Completing the grant application...</div>
+    Sometimes it's 'text divider', sometimes just 'text'.
     """
+    if not getattr(el, "name", None) or el.name.lower() != "div":
+        return False
+
+    cls = set(el.get("class", []) or [])
+    if "text" not in cls:
+        return False
+
+    # If it contains p/li, we'll capture those separately
+    if el.find(["p", "li"]) is not None:
+        return False
+
+    t = el.get_text(" ", strip=True) or ""
+    return bool(clean(t))
+
+
+# ------------------------
+# About: scrape from #guideline (handles raw text nodes + li)
+# ------------------------
+def extract_about_from_guideline(root) -> list[str]:
+    guideline = root.select_one("#guideline")
+    if not guideline:
+        return []
+
+    lines = []
+
+    # Direct text nodes inside #guideline (captures raw quoted text nodes)
+    for t in guideline.find_all(string=True, recursive=False):
+        s = (t or "").strip()
+        s = s.strip('"').strip()
+        if s:
+            lines.append(s)
+
+    # List items
+    for li in guideline.find_all("li"):
+        t = (li.get_text(" ", strip=True) or "").strip()
+        if t:
+            lines.append(t)
+
+    # fallback
+    if not lines:
+        txt = (guideline.get_text("\n", strip=True) or "").strip()
+        if txt:
+            lines.append(txt)
+
+    return lines
+
+
+# ------------------------
+# SECTION PARSING (your original approach)
+# ------------------------
+def extract_sections_excluding_about(card_body) -> list[dict]:
     sections = []
-    current_heading = "About this grant"
+    current_heading = None
     current_content = []
 
     def push():
         nonlocal current_heading, current_content
-        cleaned = [clean(x) for x in current_content if clean(x)]
-        if cleaned:
-            sections.append({"heading": current_heading, "content": cleaned})
+        if not current_heading:
+            return
+        cleaned = [c for c in (x.strip() for x in current_content) if c]
+        sections.append({"heading": current_heading, "content": cleaned})
+        current_heading = None
+        current_content = []
 
-    for el in container.descendants:
+    for el in card_body.descendants:
         if not getattr(el, "name", None):
             continue
 
-        tag = el.name.lower()
+        if is_inside_attachments(el):
+            continue
 
-        if is_portal_heading(el):
-            h = clean(el.get_text(" ", strip=True))
+        if is_heading(el):
+            h = get_heading_text(el)
             if h:
-                push()
+                # skip About heading (handled separately)
+                if norm(h) == "about this grant":
+                    current_heading = None
+                    current_content = []
+                    continue
+
+                if current_heading is not None:
+                    push()
+
                 current_heading = h
                 current_content = []
             continue
 
+        if current_heading is None:
+            continue
+
+        tag = el.name.lower()
+
         if tag == "p":
-            t = clean(el.get_text(" ", strip=True))
+            if "sub-head" in (el.get("class", []) or []):
+                continue
+            t = (el.get_text("\n", strip=True) or "").strip()
             if t:
                 current_content.append(t)
             continue
 
         if tag == "li":
-            t = clean(el.get_text(" ", strip=True))
+            t = (el.get_text("\n", strip=True) or "").strip()
             if t:
                 current_content.append(t)
             continue
 
-    push()
+        if should_capture_div_text(el):
+            t = (el.get_text("\n", strip=True) or "").strip()
+            if t:
+                current_content.append(t)
+            continue
+
+    if current_heading is not None:
+        push()
+
+    log("Sections extracted (excluding about):", [s["heading"] for s in sections])
     return sections
 
 
-def find_section(sections: list[dict], *names: str):
-    want = set(norm(n) for n in names)
-    for s in sections:
-        if norm(s["heading"]) in want:
-            return s
+# ------------------------
+# Keymap (simplified exact headings)
+# ------------------------
+KEYMAP = {
+    "who can apply?": "who_can_apply",
+    "when can i apply?": "when_to_apply",
+    "when to apply?": "when_to_apply",
+    "how much funding can you receive?": "funding",
+    "how to apply?": "how_to_apply",
+}
+
+
+
+def map_sections_to_fields(about_lines: list[str], other_sections: list[dict]) -> dict:
+    fields = {
+        "about": "\n".join(about_lines) if about_lines else None,
+        "who_can_apply": None,
+        "when_to_apply": None,
+        "funding": None,
+        "how_to_apply": None,
+    }
+
+    for s in other_sections:
+        h = norm(s["heading"])
+        field = KEYMAP.get(h)
+        if not field:
+            continue
+        fields[field] = "\n".join(s["content"]) if s["content"] else ""
+
+    return fields
+
+
+# ------------------------
+# Documents: label + href only
+# ------------------------
+def extract_documents(root, base_url: str):
+    docs = []
+    attachments = root.select_one("div.attachments[aria-label='attachment-section']")
+    if not attachments:
+        return []
+
+    for a in attachments.select("a[href]"):
+        href = a.get("href")
+        label = a.get_text(" ", strip=True)
+        if not href or not label:
+            continue
+        docs.append({
+            "label": label.strip(),
+            "href": href if href.startswith("http") else urljoin(base_url, href),
+        })
+
+    dedup = {d["href"]: d for d in docs}
+    return list(dedup.values())
+
+
+# ------------------------
+# MINIMAL FIX: How to apply? fallback
+# ------------------------
+def extract_how_to_apply_fallback(root) -> str | None:
+    """
+    Fallback when 'How to apply?' content is in the next sibling div.text.
+    Pattern:
+      <div class="Title_...">How to apply?</div>
+      <div class="text"> ... </div>
+    """
+    if not root:
+        return None
+
+    title_divs = root.select("div[class*='Title_']")
+    target = None
+    for d in title_divs:
+        if norm(d.get_text(" ", strip=True)) == "how to apply?":
+            target = d
+            break
+    if not target:
+        return None
+
+    sib = target.next_sibling
+    while sib is not None:
+        if isinstance(sib, str):
+            sib = sib.next_sibling
+            continue
+        if getattr(sib, "name", "").lower() == "div":
+            cls = set(sib.get("class", []) or [])
+            if "text" in cls:
+                t = (sib.get_text("\n", strip=True) or "").strip().strip('"').strip()
+                return t or None
+        sib = sib.next_sibling
+
     return None
 
 
+# ------------------------
+# Main scrape
+# ------------------------
 def scrape(url: str) -> dict:
-    # Keep reference for SIGINT
     state = {"browser": None}
 
     def handle_sigint(signum, frame):
@@ -204,129 +340,64 @@ def scrape(url: str) -> dict:
         if not root:
             dump_debug(page, html, "Could not find .form.instructions-page")
             browser.close()
-            raise RuntimeError("Could not find .form.instructions-page. Saved debug.html/debug.png")
+            raise RuntimeError("Could not find .form.instructions-page")
 
         agency_el = root.select_one(".card-title h2")
         title_el = root.select_one("#grant-header")
-
         agency = clean(agency_el.get_text(" ", strip=True)) if agency_el else None
         title = clean(title_el.get_text(" ", strip=True)) if title_el else None
 
         log("Extracted agency:", agency)
         log("Extracted title:", title)
 
-        # ---------------------------
-        # SECTION PARSING
-        # ---------------------------
-        guideline = root.select_one("#guideline")
-        log("Guideline found:", 1 if guideline else 0)
-
-        if not guideline:
-            dump_debug(page, html, "Could not find #guideline")
+        card_body = root.select_one(".card-body")
+        if not card_body:
+            dump_debug(page, html, "Could not find .card-body")
             browser.close()
-            raise RuntimeError("Could not find #guideline. Saved debug.html/debug.png")
+            raise RuntimeError("Could not find .card-body")
 
-        direct_children = [c for c in guideline.find_all(recursive=False) if getattr(c, "name", None)]
-        log("Guideline direct child count:", len(direct_children))
+        about_lines = extract_about_from_guideline(root)
+        log("About lines count:", len(about_lines))
 
-        headings_preview = []
-        for c in guideline.find_all(["h2", "h3", "h4"]):
-            headings_preview.append(clean(c.get_text(" ", strip=True)))
-        log("Guideline heading tags found:", headings_preview)
+        other_sections = extract_sections_excluding_about(card_body)
+        fields = map_sections_to_fields(about_lines, other_sections)
 
-        # First try heading-based split
-        sections = split_sections(guideline)
-        log("Sections extracted:", [s["heading"] for s in sections])
+        # Build full sections list (About first)
+        sections = []
+        if about_lines:
+            sections.append({"heading": "About this grant", "content": about_lines})
+        sections.extend(other_sections)
 
-        about = who_can_apply = when_to_apply = funding = how_to_apply = None
+        # --- MINIMAL FIX APPLIED HERE (only if missing/empty) ---
+        how_to_apply = fields["how_to_apply"]
+        if how_to_apply is None or (isinstance(how_to_apply, str) and how_to_apply.strip() == ""):
+            fallback = extract_how_to_apply_fallback(root)
+            if fallback:
+                fields["how_to_apply"] = fallback
+                # keep sections consistent too
+                updated = False
+                for s in sections:
+                    if norm(s["heading"]) == "how to apply?":
+                        s["content"] = [fallback]
+                        updated = True
+                        break
+                if not updated:
+                    sections.append({"heading": "How to apply?", "content": [fallback]})
 
-        only_one_section = (len(sections) <= 1)
-        no_heading_tags = (len(headings_preview) == 0)
-
-        if only_one_section and no_heading_tags:
-            log("[INFO] No heading tags found; using text-marker splitting fallback...")
-
-            lines = []
-            for el in guideline.find_all(["p", "li"]):
-                t = clean(el.get_text(" ", strip=True))
-                if t:
-                    lines.append(t)
-
-            buckets = split_by_text_markers(lines)
-
-            sections = []
-            if buckets["about"]:
-                sections.append({"heading": "About this grant", "content": buckets["about"]})
-            if buckets["who_can_apply"]:
-                sections.append({"heading": "Who Can Apply?", "content": buckets["who_can_apply"]})
-            if buckets["when_to_apply"]:
-                sections.append({"heading": "When to Apply?", "content": buckets["when_to_apply"]})
-            if buckets["funding"]:
-                sections.append({"heading": "How much funding can you receive?", "content": buckets["funding"]})
-            if buckets["how_to_apply"]:
-                sections.append({"heading": "How to apply?", "content": buckets["how_to_apply"]})
-
-            about = "\n".join(buckets["about"]) if buckets["about"] else None
-            who_can_apply = "\n".join(buckets["who_can_apply"]) if buckets["who_can_apply"] else None
-            when_to_apply = "\n".join(buckets["when_to_apply"]) if buckets["when_to_apply"] else None
-            funding = "\n".join(buckets["funding"]) if buckets["funding"] else None
-            how_to_apply = "\n".join(buckets["how_to_apply"]) if buckets["how_to_apply"] else None
-
-            log("Sections extracted (fallback):", [s["heading"] for s in sections])
-
-        else:
-            about_sec = find_section(sections, "About this grant", "About", "Overview", "Description")
-            who_sec = find_section(sections, "Who Can Apply?", "Who Can Apply", "Eligibility", "Eligible Applicants")
-            when_sec = find_section(sections, "When to Apply?", "When to Apply", "Application Period", "Deadline")
-            fund_sec = find_section(
-                sections,
-                "How much funding can you receive?",
-                "How much funding can you receive",
-                "Funding",
-                "Grant amount",
-                "Support level",
-            )
-            how_sec = find_section(sections, "How to apply?", "How to apply", "Application process", "How to Apply")
-
-            about = "\n".join(about_sec["content"]) if about_sec else None
-            who_can_apply = "\n".join(who_sec["content"]) if who_sec else None
-            when_to_apply = "\n".join(when_sec["content"]) if when_sec else None
-            funding = "\n".join(fund_sec["content"]) if fund_sec else None
-            how_to_apply = "\n".join(how_sec["content"]) if how_sec else None
-
-        if not any([about, who_can_apply, when_to_apply, funding]):
-            dump_debug(page, html, "Parsed 0 meaningful sections (after fallback)")
-            browser.close()
-            raise RuntimeError("Parsed 0 meaningful sections. Saved debug.html/debug.png")
-
-        # ---------------------------
-        # DOCUMENTS REQUIRED
-        # ---------------------------
         log("Extracting documents...")
-        documents_required = []
-        for a in root.select("a[href]"):
-            label_raw = clean(a.get_text(" ", strip=True))
-            href = a.get("href")
-            if not href or not label_raw:
-                continue
+        documents_required = extract_documents(root, url)
 
-            looks_relevant = (
-                re.search(r"(application|form|doc|pdf)", label_raw, re.I)
-                or re.search(r"\.(pdf|docx?)$", href, re.I)
-            )
-            if not looks_relevant:
-                continue
-
-            meta = parse_doc_meta(label_raw)
-            documents_required.append(
-                {
-                    "label": re.sub(r"\([^)]+\)", "", label_raw).strip(),
-                    "href": href if href.startswith("http") else urljoin(url, href),
-                    **meta,
-                }
-            )
-
-        dedup = {d["href"]: d for d in documents_required}
+        # sanity check
+        if not any([
+            fields["about"],
+            fields["who_can_apply"],
+            fields["when_to_apply"],
+            fields["funding"],
+            fields["how_to_apply"],
+        ]):
+            dump_debug(page, html, "Parsed 0 meaningful fields")
+            browser.close()
+            raise RuntimeError("Parsed 0 meaningful fields")
 
         browser.close()
         log("Closing browser...")
@@ -336,28 +407,19 @@ def scrape(url: str) -> dict:
             "source_url": url,
             "title": title,
             "agency": agency,
-            "about": about,
-            "who_can_apply": who_can_apply,
-            "when_to_apply": when_to_apply,
-            "funding": funding,
-            "how_to_apply": how_to_apply,
+            "about": fields["about"],
+            "who_can_apply": fields["who_can_apply"],
+            "when_to_apply": fields["when_to_apply"],
+            "funding": fields["funding"],
+            "how_to_apply": fields["how_to_apply"],
             "sections": sections,
-            "documents_required": list(dedup.values()),
+            "documents_required": documents_required,
             "metadata": {"last_scraped_at": datetime.now(timezone.utc).isoformat()},
         }
 
 
 if __name__ == "__main__":
-    # CLI:
-    #   python3 scripts/scrape_oursg_playwright_bs4.py "<url>" > grant.json
-    import sys as _sys
-
-    url = (
-        _sys.argv[1]
-        if len(_sys.argv) > 1
-        else "https://oursggrants.gov.sg/grants/aicccmda/instruction"
-    )
+    # python3 scripts/scrape_oursg_playwright_bs4.py "<url>" > grant.json
+    url = sys.argv[1] if len(sys.argv) > 1 else "https://oursggrants.gov.sg/grants/aicccmda/instruction"
     data = scrape(url)
-
-    # IMPORTANT: JSON to stdout only (so redirects produce clean JSON files)
     print(json.dumps(data, indent=2, ensure_ascii=False))

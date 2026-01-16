@@ -2,12 +2,12 @@ import re
 import os
 import sys
 import json
-import time
 import signal
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag
 from playwright.sync_api import sync_playwright
 
 
@@ -19,60 +19,14 @@ def log(*args):
 
 
 # ------------------------
-# Helpers (same as your scraper)
+# Helpers (same as main scraper)
 # ------------------------
 def clean(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 
-def parse_doc_meta(label: str):
-    m = re.search(r"\(([^)]+)\)", label)
-    if not m:
-        return {}
-    inside = m.group(1)
-    type_m = re.search(r"\b([A-Z]{2,5})\b", inside)
-    size_m = re.search(r"(\d+(?:\.\d+)?)\s*KB", inside, re.I)
-    out = {}
-    if type_m:
-        out["file_type"] = type_m.group(1)
-    if size_m:
-        out["size_kb"] = float(size_m.group(1))
-    return out
-
-
-FIELD_BY_MARKER = {
-    "who can apply?": "who_can_apply",
-    "who can apply": "who_can_apply",
-    "when to apply?": "when_to_apply",
-    "when to apply": "when_to_apply",
-    "how much funding can you receive?": "funding",
-    "how much funding can you receive": "funding",
-    "how to apply?": "how_to_apply",
-    "how to apply": "how_to_apply",
-}
-
-
-def split_by_text_markers(lines: list[str]) -> dict:
-    buckets = {
-        "about": [],
-        "who_can_apply": [],
-        "when_to_apply": [],
-        "funding": [],
-        "how_to_apply": [],
-    }
-    current = "about"
-
-    for line in lines:
-        t = clean(line)
-        if not t:
-            continue
-        key = FIELD_BY_MARKER.get(t.lower())
-        if key:
-            current = key
-            continue
-        buckets[current].append(t)
-
-    return buckets
+def norm(s: str) -> str:
+    return clean(s).lower()
 
 
 def dump_debug(prefix: str, html: str, screenshot_bytes: bytes | None = None):
@@ -96,30 +50,320 @@ def to_instruction_url(href: str) -> str:
       /grants/aicccmda  -> /grants/aicccmda/instruction
       /grants/aicccmda/instruction -> keep
     """
-    # strip query/hash
     u = href.split("#", 1)[0].split("?", 1)[0]
     if u.endswith("/instruction"):
         return u
     if re.search(r"^/grants/[^/]+$", u):
         return u + "/instruction"
-    # already a full URL?
+
     parsed = urlparse(u)
     if parsed.scheme and parsed.netloc:
         if u.endswith("/instruction"):
             return u
-        if re.search(r"/grants/[^/]+$", u):
+        if re.search(r"/grants/[^/]+$", parsed.path):
             return u + "/instruction"
     return u
+
+
+# ------------------------
+# KEYMAP (match main script)
+# ------------------------
+KEYMAP = {
+    "who can apply?": "who_can_apply",
+    "when can i apply?": "when_to_apply",
+    "when to apply?": "when_to_apply",
+    "how much funding can you receive?": "funding",
+    "how to apply?": "how_to_apply",
+}
+
+
+# ------------------------
+# About + Others from #guideline
+#   - About: normal intro text + bullets
+#   - Others: sub-sections like <p class="instruction-header">Title</p> + content
+# ------------------------
+def extract_about_and_others_from_guideline(root) -> tuple[list[str], list[dict]]:
+    guideline = root.select_one("#guideline")
+    if not guideline:
+        return [], []
+
+    about_lines: list[str] = []
+    others: list[dict] = []
+
+    current_heading: str | None = None
+    current_content: list[str] = []
+
+    def push_current():
+        nonlocal current_heading, current_content
+        if current_heading:
+            cleaned = [clean(x).strip('"').strip() for x in current_content if clean(x)]
+            if cleaned:
+                others.append({"heading": current_heading, "content": cleaned})
+        current_heading = None
+        current_content = []
+
+    # iterate in DOM order over direct children
+    for child in guideline.children:
+        # direct text nodes
+        if isinstance(child, NavigableString):
+            t = clean(str(child)).strip('"').strip()
+            if not t:
+                continue
+            if current_heading:
+                current_content.append(t)
+            else:
+                about_lines.append(t)
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        # instruction-header defines an "others" section
+        if child.name == "p" and "instruction-header" in (child.get("class", []) or []):
+            push_current()
+            h = clean(child.get_text(" ", strip=True))
+            current_heading = h if h else None
+            continue
+
+        # normal paragraph
+        if child.name == "p":
+            t = clean(child.get_text(" ", strip=True)).strip('"').strip()
+            if not t:
+                continue
+            if current_heading:
+                current_content.append(t)
+            else:
+                about_lines.append(t)
+            continue
+
+        # bullet list
+        if child.name == "ul":
+            lis = [clean(li.get_text(" ", strip=True)) for li in child.find_all("li")]
+            lis = [x for x in lis if x]
+            if not lis:
+                continue
+            if current_heading:
+                current_content.extend(lis)
+            else:
+                about_lines.extend(lis)
+            continue
+
+        # fallback: any other tag
+        t = clean(child.get_text(" ", strip=True)).strip('"').strip()
+        if t:
+            if current_heading:
+                current_content.append(t)
+            else:
+                about_lines.append(t)
+
+    push_current()
+
+    # fallback: if about still empty, take all text
+    if not about_lines:
+        txt = clean(guideline.get_text("\n", strip=True))
+        if txt:
+            about_lines = [line.strip() for line in txt.split("\n") if line.strip()]
+
+    return about_lines, others
+
+
+# ------------------------
+# Section parsing (keep your working approach)
+# ------------------------
+def is_inside_attachments(el) -> bool:
+    cur = el
+    while cur is not None and getattr(cur, "name", None):
+        if cur.name.lower() == "div":
+            cls = " ".join(cur.get("class", []))
+            if "attachments" in cls:
+                return True
+            if cur.get("aria-label") == "attachment-section":
+                return True
+        cur = cur.parent
+    return False
+
+
+def is_heading(el) -> bool:
+    if not getattr(el, "name", None):
+        return False
+
+    tag = el.name.lower()
+    if tag in ("h2", "h3", "h4"):
+        return True
+
+    if tag == "div":
+        cls = " ".join(el.get("class", []))
+        return "Title_" in cls
+
+    if tag == "p":
+        return "sub-head" in (el.get("class", []) or [])
+
+    return False
+
+
+def get_heading_text(el) -> str:
+    return clean(el.get_text(" ", strip=True))
+
+
+def should_capture_div_text(el) -> bool:
+    if not getattr(el, "name", None) or el.name.lower() != "div":
+        return False
+    cls = set(el.get("class", []) or [])
+    if "text" not in cls:
+        return False
+    if el.find(["p", "li"]) is not None:
+        return False
+    t = el.get_text(" ", strip=True) or ""
+    return bool(clean(t))
+
+
+def extract_sections_excluding_about(card_body) -> list[dict]:
+    sections = []
+    current_heading = None
+    current_content = []
+
+    def push():
+        nonlocal current_heading, current_content
+        if not current_heading:
+            return
+        cleaned = [c for c in (x.strip() for x in current_content) if c]
+        sections.append({"heading": current_heading, "content": cleaned})
+        current_heading = None
+        current_content = []
+
+    for el in card_body.descendants:
+        if not getattr(el, "name", None):
+            continue
+
+        if is_inside_attachments(el):
+            continue
+
+        if is_heading(el):
+            h = get_heading_text(el)
+            if h:
+                if norm(h) == "about this grant":
+                    current_heading = None
+                    current_content = []
+                    continue
+                if current_heading is not None:
+                    push()
+                current_heading = h
+                current_content = []
+            continue
+
+        if current_heading is None:
+            continue
+
+        tag = el.name.lower()
+
+        if tag == "p":
+            if "sub-head" in (el.get("class", []) or []):
+                continue
+            t = (el.get_text("\n", strip=True) or "").strip()
+            if t:
+                current_content.append(t)
+            continue
+
+        if tag == "li":
+            t = (el.get_text("\n", strip=True) or "").strip()
+            if t:
+                current_content.append(t)
+            continue
+
+        if should_capture_div_text(el):
+            t = (el.get_text("\n", strip=True) or "").strip()
+            if t:
+                current_content.append(t)
+            continue
+
+    if current_heading is not None:
+        push()
+
+    return sections
+
+
+def map_sections_to_fields(about_lines: list[str], other_sections: list[dict]) -> dict:
+    fields = {
+        "about": "\n".join(about_lines) if about_lines else None,
+        "who_can_apply": None,
+        "when_to_apply": None,
+        "funding": None,
+        "how_to_apply": None,
+    }
+
+    for s in other_sections:
+        h = norm(s["heading"])
+        field = KEYMAP.get(h)
+        if not field:
+            continue
+        fields[field] = "\n".join(s["content"]) if s["content"] else ""
+
+    return fields
+
+
+# ------------------------
+# Minimal fallback for How to apply? (match main script)
+# ------------------------
+def extract_how_to_apply_fallback(root) -> str | None:
+    """
+    Fallback when the content is in the next sibling div.text:
+      <div class="Title_...">How to apply?</div>
+      <div class="text"> ... </div>
+    """
+    if not root:
+        return None
+
+    title_divs = root.select("div[class*='Title_']")
+    target = None
+    for d in title_divs:
+        if norm(d.get_text(" ", strip=True)) == "how to apply?":
+            target = d
+            break
+    if not target:
+        return None
+
+    sib = target.next_sibling
+    while sib is not None:
+        if isinstance(sib, str):
+            sib = sib.next_sibling
+            continue
+        if getattr(sib, "name", "").lower() == "div":
+            cls = set(sib.get("class", []) or [])
+            if "text" in cls:
+                t = (sib.get_text("\n", strip=True) or "").strip().strip('"').strip()
+                return t or None
+        sib = sib.next_sibling
+
+    return None
+
+
+# ------------------------
+# Documents: label + href only (match main script)
+# ------------------------
+def extract_documents(root, base_url: str) -> list[dict]:
+    docs = []
+    attachments = root.select_one("div.attachments[aria-label='attachment-section']")
+    if not attachments:
+        return []
+
+    for a in attachments.select("a[href]"):
+        href = a.get("href")
+        label = a.get_text(" ", strip=True)
+        if not href or not label:
+            continue
+        docs.append({
+            "label": label.strip(),
+            "href": href if href.startswith("http") else urljoin(base_url, href),
+        })
+
+    dedup = {d["href"]: d for d in docs}
+    return list(dedup.values())
 
 
 # ------------------------
 # Crawl listing page -> extract grant card links
 # ------------------------
 def extract_grant_links_from_listing(page, base_url: str) -> set[str]:
-    """
-    Pull candidate grant links from the rendered listing DOM.
-    We intentionally use a heuristic approach to survive DOM/CSS changes.
-    """
     anchors = page.eval_on_selector_all(
         "a[href]",
         "els => els.map(a => a.getAttribute('href')).filter(Boolean)"
@@ -130,8 +374,6 @@ def extract_grant_links_from_listing(page, base_url: str) -> set[str]:
         if not isinstance(href, str):
             continue
 
-        # absolute -> keep; relative -> join later
-        # Filter for grants
         if "/grants/" not in href:
             continue
         if href.startswith("/grants/new"):
@@ -141,8 +383,6 @@ def extract_grant_links_from_listing(page, base_url: str) -> set[str]:
         if "/faq" in href:
             continue
 
-        # Only keep plausible grant detail pages:
-        # /grants/<slug> or /grants/<slug>/instruction
         m = re.match(r"^/grants/([^/]+)(/instruction)?/?$", href)
         if m:
             out.add(urljoin(base_url, href))
@@ -151,9 +391,6 @@ def extract_grant_links_from_listing(page, base_url: str) -> set[str]:
 
 
 def auto_load_all_cards(page, max_rounds: int = 200):
-    """
-    Keep scrolling & clicking 'Load more' (if present) until link count stops increasing.
-    """
     stable_rounds = 0
     prev_count = 0
 
@@ -168,11 +405,9 @@ def auto_load_all_cards(page, max_rounds: int = 200):
             stable_rounds = 0
             prev_count = count
 
-        # stop when stable for a few rounds
         if stable_rounds >= 3:
             break
 
-        # try click "Load more" buttons (common pattern)
         clicked = False
         for selector in [
             "button:has-text('Load more')",
@@ -194,7 +429,6 @@ def auto_load_all_cards(page, max_rounds: int = 200):
         if clicked:
             continue
 
-        # fallback: scroll
         try:
             page.mouse.wheel(0, 4000)
         except Exception:
@@ -203,7 +437,7 @@ def auto_load_all_cards(page, max_rounds: int = 200):
 
 
 # ------------------------
-# Scrape one instruction page (reusing one browser)
+# Scrape one instruction page (uses the same logic as main script)
 # ------------------------
 def scrape_instruction_page(page, url: str) -> dict:
     log("[SCRAPE] Visiting:", url)
@@ -213,7 +447,6 @@ def scrape_instruction_page(page, url: str) -> dict:
     except Exception:
         pass
 
-    # This selector is from your working script
     page.wait_for_selector(".form.instructions-page .card-body", timeout=30000)
 
     html = page.content()
@@ -228,72 +461,53 @@ def scrape_instruction_page(page, url: str) -> dict:
     agency = clean(agency_el.get_text(" ", strip=True)) if agency_el else None
     title = clean(title_el.get_text(" ", strip=True)) if title_el else None
 
-    guideline = root.select_one("#guideline")
-    if not guideline:
-        raise RuntimeError("Missing #guideline")
+    card_body = root.select_one(".card-body")
+    if not card_body:
+        raise RuntimeError("Missing .card-body")
 
-    # Build lines from p + li (DOM order) and split by markers
-    lines = []
-    for el in guideline.find_all(["p", "li"]):
-        t = clean(el.get_text(" ", strip=True))
-        if t:
-            lines.append(t)
-    buckets = split_by_text_markers(lines)
+    # UPDATED: about + others
+    about_lines, others = extract_about_and_others_from_guideline(root)
 
-    about = "\n".join(buckets["about"]) if buckets["about"] else None
-    who_can_apply = "\n".join(buckets["who_can_apply"]) if buckets["who_can_apply"] else None
-    when_to_apply = "\n".join(buckets["when_to_apply"]) if buckets["when_to_apply"] else None
-    funding = "\n".join(buckets["funding"]) if buckets["funding"] else None
-    how_to_apply = "\n".join(buckets["how_to_apply"]) if buckets["how_to_apply"] else None
+    other_sections = extract_sections_excluding_about(card_body)
+    fields = map_sections_to_fields(about_lines, other_sections)
 
+    # sections[] output (about first)
     sections = []
-    if buckets["about"]:
-        sections.append({"heading": "About this grant", "content": buckets["about"]})
-    if buckets["who_can_apply"]:
-        sections.append({"heading": "Who Can Apply?", "content": buckets["who_can_apply"]})
-    if buckets["when_to_apply"]:
-        sections.append({"heading": "When to Apply?", "content": buckets["when_to_apply"]})
-    if buckets["funding"]:
-        sections.append({"heading": "How much funding can you receive?", "content": buckets["funding"]})
-    if buckets["how_to_apply"]:
-        sections.append({"heading": "How to apply?", "content": buckets["how_to_apply"]})
+    if about_lines:
+        sections.append({"heading": "About this grant", "content": about_lines})
+    sections.extend(other_sections)
 
-    # Documents (same heuristic)
-    documents_required = []
-    for a in root.select("a[href]"):
-        label_raw = clean(a.get_text(" ", strip=True))
-        href = a.get("href")
-        if not href or not label_raw:
-            continue
+    # How to apply fallback (only if missing/empty)
+    how_to_apply = fields["how_to_apply"]
+    if how_to_apply is None or (isinstance(how_to_apply, str) and how_to_apply.strip() == ""):
+        fb = extract_how_to_apply_fallback(root)
+        if fb:
+            fields["how_to_apply"] = fb
+            # keep sections consistent
+            updated = False
+            for s in sections:
+                if norm(s["heading"]) == "how to apply?":
+                    s["content"] = [fb]
+                    updated = True
+                    break
+            if not updated:
+                sections.append({"heading": "How to apply?", "content": [fb]})
 
-        looks_relevant = (
-            re.search(r"(application|form|doc|pdf)", label_raw, re.I)
-            or re.search(r"\.(pdf|docx?)$", href, re.I)
-        )
-        if not looks_relevant:
-            continue
-
-        meta = parse_doc_meta(label_raw)
-        documents_required.append({
-            "label": re.sub(r"\([^)]+\)", "", label_raw).strip(),
-            "href": href if href.startswith("http") else urljoin(url, href),
-            **meta
-        })
-
-    dedup = {d["href"]: d for d in documents_required}
+    documents_required = extract_documents(root, url)
 
     return {
         "source": "oursggrants",
         "source_url": url,
         "title": title,
         "agency": agency,
-        "about": about,
-        "who_can_apply": who_can_apply,
-        "when_to_apply": when_to_apply,
-        "funding": funding,
-        "how_to_apply": how_to_apply,
+        "about": fields["about"],
+        "who_can_apply": fields["who_can_apply"],
+        "when_to_apply": fields["when_to_apply"],
+        "funding": fields["funding"],
+        "how_to_apply": fields["how_to_apply"],
+        "others": others,
         "sections": sections,
-        "documents_required": list(dedup.values()),
+        "documents_required": documents_required,
         "metadata": {"last_scraped_at": datetime.now(timezone.utc).isoformat()},
     }
 
@@ -303,7 +517,7 @@ def scrape_instruction_page(page, url: str) -> dict:
 # ------------------------
 def main():
     listing_url = "https://oursggrants.gov.sg/grants/new"
-    limit = None  # set via CLI
+    limit = None
 
     # CLI:
     # python3 scripts/crawl_oursg_grants_new.py [--limit 10] > grants.jsonl
@@ -343,7 +557,6 @@ def main():
         except Exception:
             pass
 
-        # wait for any anchors to appear
         page.wait_for_selector("a[href*='/grants/']", timeout=30000)
 
         log("Auto-loading all grant cards (scroll/load more)...")
@@ -355,16 +568,13 @@ def main():
         # Convert to instruction URLs
         instruction_urls = []
         for link in sorted(all_links):
-            # normalize
             if link.startswith("http"):
-                # convert absolute /grants/x to /grants/x/instruction
                 path = urlparse(link).path
                 inst_path = to_instruction_url(path)
                 instruction_urls.append(urljoin("https://oursggrants.gov.sg", inst_path))
             else:
                 instruction_urls.append(urljoin("https://oursggrants.gov.sg", to_instruction_url(link)))
 
-        # de-dup
         instruction_urls = list(dict.fromkeys(instruction_urls))
         log(f"[LIST] Instruction URLs: {len(instruction_urls)}")
 
@@ -372,18 +582,16 @@ def main():
             instruction_urls = instruction_urls[:limit]
             log(f"[LIST] Applying limit={limit}, now {len(instruction_urls)} URLs")
 
-        # Scrape each instruction page
         out_count = 0
         for idx, inst_url in enumerate(instruction_urls, start=1):
             try:
-                # use a fresh page per grant (more stable)
                 grant_page = context.new_page()
                 grant_page.set_default_timeout(20000)
 
                 data = scrape_instruction_page(grant_page, inst_url)
                 grant_page.close()
 
-                # JSONL to stdout (so redirect works cleanly)
+                # JSONL to stdout (redirect-safe)
                 print(json.dumps(data, ensure_ascii=False))
                 out_count += 1
                 log(f"[OK] {idx}/{len(instruction_urls)} scraped")
@@ -391,9 +599,12 @@ def main():
             except Exception as e:
                 log(f"[ERR] {idx}/{len(instruction_urls)} {inst_url} -> {e}")
                 try:
-                    # dump debug for this grant
                     dbg_page = context.pages[-1] if context.pages else page
-                    dump_debug(f"fail_{idx}", dbg_page.content(), dbg_page.screenshot(full_page=True))
+                    dump_debug(
+                        f"fail_{idx}",
+                        dbg_page.content(),
+                        dbg_page.screenshot(full_page=True),
+                    )
                 except Exception:
                     pass
                 continue
