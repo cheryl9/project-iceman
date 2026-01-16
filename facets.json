@@ -1,0 +1,51 @@
+{
+  "issue_areas": {
+    "community": 30,
+    "education": 17,
+    "youth": 14,
+    "health": 10,
+    "arts_culture": 9,
+    "ageing": 6,
+    "employment": 5,
+    "sports": 5,
+    "digital_tech": 4,
+    "disability_inclusion": 4,
+    "environment": 3
+  },
+  "scope": {
+    "Project / Programme": 33,
+    "Manpower & Training": 15,
+    "research_evaluation": 7,
+    "operations_support": 2,
+    "equipment_capex": 1
+  },
+  "funding_band": {
+    "unknown": 17,
+    "lt_5k": 8,
+    "20k_100k": 8,
+    "gt_100k": 4,
+    "5k_20k": 3
+  },
+  "due_date_bucket": {
+    "unknown": 20,
+    "all_year": 19,
+    "has_dates": 1
+  },
+  "agency": {
+    "National Youth Council": 10,
+    "Agency for Integrated Care": 6,
+    "National Arts Council": 6,
+    "National Council of Social Service": 5,
+    "Sport Singapore": 4,
+    "Ministry of Culture, Community and Youth": 3,
+    "Tote Board": 2,
+    "Housing & Development Board": 1,
+    "Municipal Services Office": 1,
+    "Tote Board - National Arts Council": 1,
+    "Community Development Council - National Arts Council": 1
+  },
+  "mentions_kpi": {
+    "True": 31,
+    "False": 9
+  }
+}
