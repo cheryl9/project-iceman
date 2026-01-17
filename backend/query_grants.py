@@ -1,33 +1,11 @@
-"""
-Helper functions to query grants from Firestore.
-"""
-
 from firebase_init import db
 from typing import List, Dict, Any, Optional
 
 
-def get_all_grants(limit: int = 100) -> List[Dict[str, Any]]:
-    """Fetch all grants with optional limit."""
-    docs = db.collection("grants").limit(limit).stream()
-    
-    grants = []
-    for doc in docs:
-        grant = doc.to_dict()
-        grant['id'] = doc.id
-        grants.append(grant)
-    
-    return grants
-
-
-def get_grant_by_id(grant_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single grant by ID."""
-    doc = db.collection("grants").document(grant_id).get()
-    
-    if doc.exists:
-        grant = doc.to_dict()
-        grant['id'] = doc.id
-        return grant
-    return None
+def get_all_grants():
+    grants_ref = db.collection("grants")
+    docs = grants_ref.stream()
+    return [{**doc.to_dict(), "id": doc.id} for doc in docs]
 
 
 def search_grants_by_agency(agency: str, limit: int = 50) -> List[Dict[str, Any]]:
