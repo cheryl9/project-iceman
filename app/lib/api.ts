@@ -138,3 +138,10 @@ export async function getGrantsSummary() {
   if (!response.ok) throw new Error('Failed to fetch summary');
   return await response.json();
 }
+
+export async function getSavedGrants(userId: string): Promise<FirebaseGrant[]> {
+  const response = await fetch(`${API_BASE_URL}/api/saved/${userId}`);
+  if (!response.ok) throw new Error('Failed to fetch saved grants');
+  const data = await response.json();
+  return data.saved_grants || [];
+}

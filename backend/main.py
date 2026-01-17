@@ -39,6 +39,13 @@ class NPOProfile(BaseModel):
     description: Optional[str] = ""
 
 
+class SwipeRequest(BaseModel):
+    user_id: str
+    grant_id: str
+    action: str  # "like" or "dislike"
+    match_score: float
+
+
 class MatchRequest(BaseModel):
     npo_profile: NPOProfile
     limit: Optional[int] = 20
@@ -171,33 +178,61 @@ async def get_recommendations(user_id: str, limit: int = 20):
 
 
 @app.post("/api/swipe")
-async def save_swipe(
-    user_id: str,
-    grant_id: str,
-    action: str,  # "like" or "dislike"
-    match_score: float
-):
+async def save_swipe(request: SwipeRequest):
     """Save user's swipe action"""
     try:
         swipe_data = {
-            "user_id": user_id,
-            "grant_id": grant_id,
-            "action": action,
-            "match_score": match_score,
+            "user_id": request.user_id,
+            "grant_id": request.grant_id,
+            "action": request.action,
+            "match_score": request.match_score,
             "timestamp": firestore.SERVER_TIMESTAMP
         }
         
         db.collection('swipes').add(swipe_data)
         
         # Update user's liked/disliked lists
-        field = "liked_grants" if action == "like" else "disliked_grants"
-        db.collection('npo_profiles').document(user_id).update({
-            field: firestore.ArrayUnion([grant_id])
+        field = "liked_grants" if request.action == "like" else "disliked_grants"
+        db.collection('npo_profiles').document(request.user_id).update({
+            field: firestore.ArrayUnion([request.grant_id])
         })
         
         return {
             "status": "success",
-            "message": f"Swipe {action} saved"
+            "message": f"Swipe {request.action} saved"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/saved/{user_id}")
+async def get_saved_grants(user_id: str):
+    """Get all grants the user has liked"""
+    try:
+        # Get swipes where action is 'like'
+        swipes_ref = db.collection('swipes').where('user_id', '==', user_id).where('action', '==', 'like')
+        
+        saved_grants = []
+        for swipe_doc in swipes_ref.stream():
+            swipe_data = swipe_doc.to_dict()
+            grant_id = swipe_data.get('grant_id')
+            
+            # Find the grant by source_url
+            grants_ref = db.collection('grants').where('source_url', '==', grant_id)
+            grant_docs = list(grants_ref.stream())
+            
+            if grant_docs:
+                grant_data = grant_docs[0].to_dict()
+                grant_data['firestore_id'] = grant_docs[0].id
+                grant_data['match_score'] = swipe_data.get('match_score', 0)
+                grant_data['saved_at'] = swipe_data.get('timestamp')
+                saved_grants.append(grant_data)
+        
+        return {
+            "status": "success",
+            "saved_grants": saved_grants,
+            "total": len(saved_grants)
         }
         
     except Exception as e:

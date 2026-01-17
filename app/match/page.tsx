@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import GrantCard from "../components/GrantCard";
 import BottomNav from "../components/BottomNav";
-import { fetchGrants, type FirebaseGrant, calculateMatches, type NPOProfile } from "../lib/api";
+import { fetchGrants, type FirebaseGrant, calculateMatches, type NPOProfile, saveSwipe } from "../lib/api";
 import { Grant } from "../lib/types";
 
 function convertFirebaseToGrant(fbGrant: FirebaseGrant): Grant {
@@ -103,12 +103,24 @@ export default function MatchPage() {
     loadMatchedGrants();
   }, []);
 
-  const handleSwipe = (direction: "left" | "right") => {
+  const handleSwipe = async (direction: "left" | "right") => {
     const current = grants[0];
     if (!current) return;
 
-    if (direction === "right") {
-      setSaved((prev) => [...prev, current]);
+    // Save swipe to backend
+    const userId = localStorage.getItem("user_id");
+    if (userId) {
+      try {
+        const action = direction === "right" ? "like" : "dislike";
+        const grantId = current.applicationUrl || current.id || "";
+        await saveSwipe(userId, grantId, action, current.matchScore || 0);
+        
+        if (direction === "right") {
+          setSaved((prev) => [...prev, current]);
+        }
+      } catch (error) {
+        console.error("Error saving swipe:", error);
+      }
     }
 
     setGrants((prev) => prev.slice(1));
