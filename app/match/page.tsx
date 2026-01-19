@@ -309,9 +309,6 @@ export default function MatchPage() {
                 <div className="text-center py-10">
                   <div className="text-4xl mb-3">⚠️</div>
                   <p className="text-red-600 font-semibold">{error}</p>
-                  <p className="mt-2 text-sm text-gray-600">
-                    Backend should run at <span className="font-mono">http://localhost:8000</span>
-                  </p>
                 </div>
               ) : grants.length > 0 ? (
                 <SwipeableGrantCard grant={grants[0]} onSwipe={handleSwipe} />

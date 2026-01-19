@@ -205,7 +205,7 @@ export default function OnboardingPage() {
     } catch (error) {
       console.error("Failed to save profile:", error);
       const newErrors = { ...errors };
-      newErrors[6] = "Failed to save profile. Please ensure the backend is running.";
+      newErrors[6] = "Failed to save profile. Please try again.";
       setErrors(newErrors);
     } finally {
       setSaving(false);

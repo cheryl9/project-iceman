@@ -57,38 +57,13 @@ export default function BrowsePage() {
       try {
         setLoading(true);
         
-        // Fetch from backend API instead of Firebase
-        const response = await fetch('http://localhost:8000/api/grants');
-        if (!response.ok) throw new Error('Failed to fetch grants');
-        
-        const data = await response.json();
-        const converted = (data || []).map((grantData: any) => {
-          const profile = grantData.grant_profile || {};
-          const funding = profile.funding || {};
-          const applicationWindow = profile.application_window || {};
-
-          return {
-            id: grantData.id || grantData.source_url || "unknown",
-            title: grantData.title,
-            organization: grantData.agency,
-            description: grantData.about || "",
-            issueAreas: profile.issue_areas || [],
-            scope: profile.scope_tags?.[0] || "",
-            fundingMin: funding.min_amount_sgd || 0,
-            fundingMax: funding.cap_amount_sgd || 0,
-            fundingRaw: funding.raw || grantData.funding || "",
-            deadline: applicationWindow.end_date || applicationWindow.dates?.[0] || "2026-12-31",
-            eligibility: profile.eligibility?.requirements || [],
-            kpis: [],
-            applicationUrl: grantData.source_url || "",
-          };
-        });
-        
+        const data = await fetchGrants();
+        const converted = (data || []).map(convertFirebaseToGrant);
         setGrants(converted);
         setError(null);
       } catch (err) {
         console.error("Failed to load grants:", err);
-        setError("Failed to load grants. Please ensure the backend is running.");
+        setError("Failed to load grants. Please try again.");
       } finally {
         setLoading(false);
       }
@@ -181,9 +156,6 @@ export default function BrowsePage() {
         ) : error ? (
           <div className="text-center mt-12">
             <p className="text-red-500 mb-2">{error}</p>
-            <p className="text-sm text-gray-500">
-              Make sure the backend is running on http://localhost:8000
-            </p>
           </div>
         ) : filteredGrants.length > 0 ? (
           filteredGrants.map((grant, idx) => {

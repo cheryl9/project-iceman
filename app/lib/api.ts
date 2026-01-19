@@ -1,8 +1,6 @@
 import { db } from "./firebase";
 import { collection, query, where, getDocs, setDoc, doc, serverTimestamp, getDoc, writeBatch } from "firebase/firestore";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
 export interface NPOProfile {
   organization_name: string;
   organization_type: string;
