@@ -2,7 +2,8 @@
 
 This document provides details about the frontend and backend implementation for our Granted project.
 
-Granted Frontend  
+Granted Frontend [Backend](#backend)
+
 Granted Backend
 
 ## **Project Overview:**
