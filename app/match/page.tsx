@@ -131,7 +131,7 @@ export default function MatchPage() {
           return;
         }
 
-        const { matches } = await calculateMatches(profile, 50);
+        const { matches } = await calculateMatches(profile as any, 50);
 
         const mapMatch = (m: any): Grant => {
           const grantData = m.grant;

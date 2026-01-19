@@ -24,9 +24,12 @@ if (typeof window !== "undefined" && firebaseConfig.apiKey && firebaseConfig.pro
     app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
     db = getFirestore(app);
     auth = getAuth(app);
+    console.log('Firebase initialized successfully with project:', firebaseConfig.projectId);
   } catch (error) {
-    console.warn('Firebase initialization failed:', error);
+    console.error('Firebase initialization failed:', error, 'Config:', firebaseConfig);
   }
+} else {
+  console.warn('Firebase init skipped. Window:', typeof window, 'API Key:', !!firebaseConfig.apiKey, 'Project ID:', firebaseConfig.projectId);
 }
 
 export { db, auth };
