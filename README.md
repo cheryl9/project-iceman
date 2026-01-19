@@ -13,7 +13,7 @@ Github Link: [https://github.com/cheryl9/project-iceman.git](https://github.com/
 
 ## **Product Prototype**
 
-Link: [https://project-iceman-dun.vercel.app/](https://project-iceman-wheat.vercel.app/)
+Link: [https://project-iceman-wheat.vercel.app/](https://project-iceman-dun.vercel.app/)
 
 ## **Technological Stack**
 
