@@ -2,9 +2,8 @@
 
 This document provides details about the frontend and backend implementation for our Granted project.
 
-Granted Frontend [Backend](#backend)
-
-Granted Backend
+[Granted Frontend](#granted-frontend)
+[Granted Backend](#granted-backend)
 
 ## **Project Overview:**
 
@@ -87,7 +86,7 @@ Granted is a web application designed to simplify grant discovery for nonprofits
 
 ## **Technologies & Tools Used**
 
-* [React.js](http://React.js), [Next.js](http://Next.js),   
+* [React.js](http://React.js), [Next.js](http://Next.js)  
 * Tailwind CSS  
 * Figma
 
