@@ -29,7 +29,15 @@ export function formatCurrency(amount: number): string {
 }
 
 export function formatDeadline(dateString: string): string {
+  if (!dateString || dateString === 'No deadline specified') return 'No deadline';
+  
   const date = new Date(dateString);
+  
+  // If date is invalid, return the original string (it's likely a description like "Rolling")
+  if (isNaN(date.getTime())) {
+    return dateString;
+  }
+  
   const now = new Date();
   const diffTime = date.getTime() - now.getTime();
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
