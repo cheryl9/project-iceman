@@ -94,7 +94,7 @@ Granted is a web application designed to simplify grant discovery for nonprofits
 
 Inspired by dating platforms that prioritize intuitive decision-making and user-centered design, Granted’s UI focuses on clarity, context, and seamless interactions. The swipe-based card interface allows users to quickly indicate interest or disinterest in grants, while advanced filters help narrow down opportunities by sector, funding amount, KPIs, and deadlines. Saved grants are organised in a centralised dashboard, giving users a clear overview of opportunities and upcoming deadlines. Visual gradients, responsive cards, and dynamic charts guide nonprofits in making informed funding decisions efficiently, and the interface incorporates TikTok-inspired colours to create a modern, engaging, and familiar user experience.
 
-## Granted Backend**
+## **ReviewGuard AI Backend**
 
 The Granted backend is designed to provide nonprofits with fast, reliable, and intelligent access to grant opportunities. It leverages **Firebase Firestore** for real-time data storage and retrieval, **Python scripts and AI pipelines** for personalized grant recommendations, and advanced filtering logic to enable dynamic exploration of opportunities.
 
