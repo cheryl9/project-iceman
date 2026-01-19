@@ -164,7 +164,7 @@ export default function GrantCard({ grant, onSwipe }: GrantCardProps) {
             {/* AI Match Analysis */}
             {grant.reasoning && (
               <div className="bg-white rounded-lg p-4 border border-indigo-200">
-                <h4 className="font-semibold text-indigo-700 mb-2">AI Match Analysis</h4>
+                <h4 className="font-semibold text-indigo-700 mb-2">🤖 AI Match Analysis</h4>
                 <p className="text-sm text-gray-700 leading-relaxed">{grant.reasoning}</p>
               </div>
             )}
