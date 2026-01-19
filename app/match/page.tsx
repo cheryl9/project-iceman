@@ -124,77 +124,37 @@ export default function MatchPage() {
         localStorage.setItem("saved_grant_keys", JSON.stringify(Array.from(savedKeys)));
         setSavedCount(savedKeys.size);
 
-        const response = await fetch(
-          `http://localhost:8000/api/match/recommendations/${storedUserId}?limit=50`
-        );
-        
-        let allMatchedGrants: Grant[] = [];
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.warn("Backend error, falling back to all grants:", errorText);
-          
-          // Fallback: fetch all grants if profile not found
-          const grantsResponse = await fetch(`http://localhost:8000/api/grants`);
-          if (grantsResponse.ok) {
-            const grantsData = await grantsResponse.json();
-            allMatchedGrants = (grantsData.grants || grantsData || []).slice(0, 50).map((grantData: any) => {
-              const profile = grantData.grant_profile || {};
-              const funding = profile.funding || {};
-              const applicationWindow = profile.application_window || {};
+        const { fetchGrants } = await import("../lib/api");
+        const grantsData = await fetchGrants();
 
-              return {
-                id: grantData.firestore_id || grantData.id || "unknown",
-                title: grantData.title,
-                organization: grantData.agency,
-                description: grantData.about || "",
-                issueAreas: profile.issue_areas || [],
-                scope: profile.scope_tags?.[0] || "",
-                fundingMin: funding.min_amount_sgd || 0,
-                fundingMax: funding.cap_amount_sgd || 0,
-                fundingRaw: funding.raw || grantData.funding || "",
-                deadline: applicationWindow.end_date || applicationWindow.dates?.[0] || "2026-12-31",
-                eligibility: profile.eligibility?.requirements || [],
-                kpis: [],
-                applicationUrl: grantData.source_url || "",
-                matchScore: 75,
-                confidence: "medium",
-                reasoning: "Complete onboarding to get personalized matches",
-                strengths: ["Available grant opportunity"],
-                concerns: ["Complete your profile for better matching"],
-              };
-            });
-          }
-        } else {
-          const data = await response.json();
-          allMatchedGrants = (data.recommendations || []).map((match: any) => {
-            const grantData = match.grant_data || match;
-            const profile = grantData.grant_profile || {};
-            const funding = profile.funding || {};
-            const applicationWindow = profile.application_window || {};
+        const mapGrant = (grantData: any): Grant => {
+          const profile = grantData.grant_profile || {};
+          const funding = profile.funding || {};
+          const applicationWindow = profile.application_window || {};
 
-            return {
-              id: grantData.firestore_id || grantData.id || match.grant_id || "unknown",
-              title: match.grant_name || grantData.title,
-              organization: match.agency || grantData.agency,
-              description: grantData.about || "",
-              issueAreas: profile.issue_areas || [],
-              scope: profile.scope_tags?.[0] || "",
-              fundingMin: funding.min_amount_sgd || 0,
-              fundingMax: funding.cap_amount_sgd || 0,
-              fundingRaw: funding.raw || grantData.funding || "",
-              deadline: applicationWindow.end_date || applicationWindow.dates?.[0] || "2026-12-31",
-              eligibility: profile.eligibility?.requirements || [],
-              kpis: [],
-              applicationUrl: match.grant_url || grantData.source_url || "",
-              matchScore: match.match_score,
-              confidence: match.confidence,
-              reasoning: match.reasoning,
-              strengths: match.strengths,
-              concerns: match.concerns,
-            };
-          });
-        }
+          return {
+            id: grantData.firestore_id || grantData.id || "unknown",
+            title: grantData.title,
+            organization: grantData.agency,
+            description: grantData.about || "",
+            issueAreas: profile.issue_areas || [],
+            scope: profile.scope_tags?.[0] || "",
+            fundingMin: funding.min_amount_sgd || 0,
+            fundingMax: funding.cap_amount_sgd || 0,
+            fundingRaw: funding.raw || grantData.funding || "",
+            deadline: applicationWindow.end_date || applicationWindow.dates?.[0] || "2026-12-31",
+            eligibility: profile.eligibility?.requirements || [],
+            kpis: [],
+            applicationUrl: grantData.source_url || "",
+            matchScore: 75,
+            confidence: "medium",
+            reasoning: "Based on your profile",
+            strengths: ["Available grant opportunity"],
+            concerns: ["Complete your profile for better matching"],
+          };
+        };
+
+        const allMatchedGrants: Grant[] = (grantsData || []).slice(0, 50).map(mapGrant);
 
         // Filter out already saved grants
         const unseenGrants = allMatchedGrants.filter(grant => {
@@ -206,7 +166,7 @@ export default function MatchPage() {
         setError(null);
       } catch (err) {
         console.error(err);
-        setError("Failed to load grants. Please ensure the backend is running.");
+        setError("Failed to load grants. Please try again.");
       } finally {
         setLoading(false);
       }
